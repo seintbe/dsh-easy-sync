@@ -1,0 +1,43 @@
+{
+  "name": "dsh-easy-sync",
+  "version": "0.1.0",
+  "description": "Workspace-scoped conversation sync for DeepSeek Harness: archive every session of a sync workspace into the workspace itself and restore it before startup.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./paths": "./src/paths.js",
+    "./session-file": "./src/session-file.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "deepseek",
+    "dsh",
+    "session-sync",
+    "workspace"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.15"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "test:unit": "node --test \"test/paths.test.js\" \"test/session-file.test.js\" \"test/config.test.js\" \"test/engine.test.js\" \"test/plugin.test.js\"",
+    "test:e2e": "node --test \"test/e2e.test.js\""
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

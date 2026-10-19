@@ -1,0 +1,10 @@
+# Keep the bash installer runnable when the repository travels between
+# Windows and macOS/Linux; PowerShell scripts stay native-CRLF.
+*.sh text eol=lf
+*.ps1 text eol=crlf
+*.js text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

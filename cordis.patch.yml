@@ -1,0 +1,9 @@
+# dsh-easy-sync bundle declaration.
+#
+# Installing this package as a profile bundle appends one host plugin to the
+# composed entry list. The plugin needs no hard service dependency: it restores
+# session files from the workspace archive during activation and then attaches
+# the restored sessions to the workspace registry once that service is ready.
+- insert:
+    - id: dsh-easy-sync
+      name: dsh-easy-sync
