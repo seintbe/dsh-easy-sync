@@ -299,6 +299,22 @@ export function apply(ctx, rawConfig = {}) {
         const routes = registerWebRoutes(child, {
           engine,
           log,
+          onWorkspaceEnabled: async (workspace) => {
+            // The session menu and the sidebar panel can opt a workspace in
+            // from the browser; make it visible in the registry immediately.
+            if (typeof workspace?.path === 'string') startupSynced.add(pathKey(workspace.path))
+            const registry = safeGet(ctx, 'workspaceRegistry')
+            if (registry === undefined || registry === null) return
+            try {
+              await reconcileWithRegistry(registry, engine, {
+                log,
+                registerWorkspaces: config.registerWorkspaces,
+                startupSynced,
+              })
+            } catch (error) {
+              log('warn', `registry reconciliation after enable failed: ${errorText(error)}`)
+            }
+          },
           onRegistered: (paths) => {
             log('debug', `registered web route(s): ${paths.join(', ')}`)
             writeStartupSnapshot(config, 'web', { phase: 'web', routes: paths })
@@ -510,7 +526,11 @@ async function runToolAction(args, deps) {
 
   if (action === 'enable') {
     if (targetPath === undefined) return 'dsh-easy-sync: enable needs an absolute workspace `path`.'
-    const result = engine.enable(targetPath, { note: 'enabled from workspace_sync tool' })
+    const registryBefore = safeGet(ctx, 'workspaceRegistry')
+    const registryPaths = registryBefore !== undefined && typeof registryBefore.list === 'function'
+      ? registryBefore.list().map((workspace) => workspace.path).filter((item) => typeof item === 'string')
+      : []
+    const result = engine.enable(targetPath, { note: 'enabled from workspace_sync tool', registryPaths })
     const registry = await refresh()
     if (registry !== undefined) {
       await reconcileWithRegistry(registry, engine, { log, registerWorkspaces, startupSynced })

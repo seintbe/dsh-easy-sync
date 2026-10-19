@@ -33,7 +33,7 @@ import { fileURLToPath } from 'node:url'
 
 import { encodeSegment, generationLogFilename, sessionDir } from '../src/paths.js'
 import { encodeSessionLog, inspectSessionFile } from '../src/session-file.js'
-import { ACTION_ROUTE, INFO_ROUTE } from '../src/web-routes.js'
+import { ACTION_ROUTE, INFO_ROUTE, WORKSPACES_ROUTE, WORKSPACE_ACTION_ROUTE } from '../src/web-routes.js'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const dshBin = process.env.DSH_BIN || (process.platform === 'win32' ? 'dsh.cmd' : 'dsh')
@@ -242,7 +242,7 @@ test(
           return undefined
         }
       }, 30_000, 'the client-menu web routes to register')
-      assert.deepEqual(webSnapshot.routes, [INFO_ROUTE, ACTION_ROUTE])
+      assert.deepEqual(webSnapshot.routes, [INFO_ROUTE, ACTION_ROUTE, WORKSPACES_ROUTE, WORKSPACE_ACTION_ROUTE])
 
       // Prove the client half is actually served by the real web client module
       // system: the shell HTML carries the boot graph, and one served script

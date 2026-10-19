@@ -155,7 +155,7 @@ export class SyncEngine {
    * Opt a workspace into sync and reconcile anything it already has.
    *
    * @param {string} workspacePath
-   * @param {{ note?: string }} [options]
+   * @param {{ note?: string, registryPaths?: string[] }} [options]
    * @returns {{ workspace: SyncWorkspace, report: ReturnType<typeof emptyReport>, markerCreated: boolean }}
    */
   enable(workspacePath, options = {}) {
@@ -166,7 +166,11 @@ export class SyncEngine {
     })
     const canonical = canonicalDirectory(workspacePath)
     if (canonical === undefined) throw new Error(`workspace directory does not exist: ${workspacePath}`)
-    this.refreshWorkspaces()
+    // The workspace may be brand new to this process and neither configured nor
+    // remembered yet; naming it in the discovery candidates makes the marker we
+    // just wrote visible without requiring a roots scan.
+    const registryPaths = [...new Set([...(options.registryPaths ?? []), canonical])]
+    this.refreshWorkspaces({ registryPaths })
     const workspace = this.workspaceForCwd(canonical)
     if (workspace === undefined) throw new Error(`failed to register sync workspace: ${workspacePath}`)
     const report = this.syncWorkspace(workspace, { restore: true, archive: true })

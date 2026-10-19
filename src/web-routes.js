@@ -1,25 +1,32 @@
 // Host-side HTTP routes for the optional desktop client plugin.
 //
-// The client half (../client.js) renders "sync this workspace" entries in the
-// session row menu. It cannot reach the Host's engine directly, so these two
-// routes are the bridge:
+// The client half (../client.js) renders menu entries and the sidebar "Easy
+// Sync" panel. It cannot reach the Host's engine directly, so these routes are
+// the bridge:
 //
-//   GET  /dsh-easy-sync/session?sessionId=...  -> is the session's workspace a sync workspace?
-//   POST /dsh-easy-sync/session-action         -> {"sessionId", action: "sync"|"restore"|"archive"}
+//   GET  /dsh-easy-sync/session?sessionId=...   -> workspace behind one session, enabled or not
+//   POST /dsh-easy-sync/session-action          -> {"sessionId", action: "sync"|"restore"|"archive"|"enable"|"disable"}
+//   GET  /dsh-easy-sync/workspaces              -> workspaces known to the registry + sync state
+//   POST /dsh-easy-sync/workspace-action        -> {"path", action: "enable"|"disable"|"sync"}
 //
-// Both routes sit behind the composition's `connection` trust fence, exactly
+// Every route sits behind the composition's `connection` trust fence, exactly
 // like DSH's own open-in-app routes: without it, a cross-site request could
 // mutate the operator's conversation archive. The routes are only registered
 // when both `webServer` and `connection` exist (web profiles), so headless
 // profiles keep the plugin's agent-tool-only surface.
 
+import { basename } from 'node:path'
+
+import { pathKey } from './config.js'
 import { readLocalEntry } from './engine.js'
 
-/** Client mirror: keep these two constants in sync with ../client.js. */
+/** Client mirror: keep these constants in sync with ../client.js. */
 export const INFO_ROUTE = '/dsh-easy-sync/session'
 export const ACTION_ROUTE = '/dsh-easy-sync/session-action'
+export const WORKSPACES_ROUTE = '/dsh-easy-sync/workspaces'
+export const WORKSPACE_ACTION_ROUTE = '/dsh-easy-sync/workspace-action'
 
-/** Session rows carry small JSON bodies; anything larger is hostile. */
+/** Route bodies carry small JSON objects; anything larger is hostile. */
 const MAX_BODY_BYTES = 64 * 1024
 
 const ACTIONS = {
@@ -29,13 +36,14 @@ const ACTIONS = {
 }
 
 /**
- * Register the two routes on a context that already has `webServer` and
+ * Register the four routes on a context that already has `webServer` and
  * `connection`.
  *
  * @param {any} ctx
  * @param {{
  *   engine: import('./engine.js').SyncEngine,
  *   log: (kind: 'error'|'warn'|'info'|'debug', message: string) => void,
+ *   onWorkspaceEnabled?: (workspace: { path: string, title: string }) => Promise<void> | void,
  *   onRegistered?: (routes: string[]) => void,
  * }} deps
  * @returns {string[]} the registered paths (empty when the services are unusable)
@@ -43,7 +51,7 @@ const ACTIONS = {
 export function registerWebRoutes(ctx, deps) {
   const webServer = ctx?.webServer
   if (webServer === undefined || typeof webServer.register !== 'function') return []
-  const routes = [INFO_ROUTE, ACTION_ROUTE]
+  const routes = [INFO_ROUTE, ACTION_ROUTE, WORKSPACES_ROUTE, WORKSPACE_ACTION_ROUTE]
   const register = (path, handler, label) => {
     const dispose = webServer.register({ kind: 'exact', path, handler })
     try {
@@ -56,6 +64,8 @@ export function registerWebRoutes(ctx, deps) {
   }
   register(INFO_ROUTE, (req, res) => handleInfoRequest(ctx, deps, req, res), `GET ${INFO_ROUTE}`)
   register(ACTION_ROUTE, (req, res) => handleActionRequest(ctx, deps, req, res), `POST ${ACTION_ROUTE}`)
+  register(WORKSPACES_ROUTE, (req, res) => handleWorkspacesRequest(ctx, deps, req, res), `GET ${WORKSPACES_ROUTE}`)
+  register(WORKSPACE_ACTION_ROUTE, (req, res) => handleWorkspaceActionRequest(ctx, deps, req, res), `POST ${WORKSPACE_ACTION_ROUTE}`)
   deps.onRegistered?.(routes)
   return routes
 }
@@ -103,6 +113,10 @@ export function resolveSessionWorkspace(ctx, deps, sessionId) {
 /**
  * Pure decision function behind GET /dsh-easy-sync/session.
  *
+ * `workspace` is returned even when the workspace is not opted in yet (title is
+ * the directory name), which is what lets the session menu offer a one-click
+ * "enable this workspace".
+ *
  * @param {any} ctx
  * @param {{ engine: import('./engine.js').SyncEngine }} deps
  * @param {string} sessionId
@@ -113,29 +127,35 @@ export function sessionInfo(ctx, deps, sessionId) {
     return { status: 400, body: { ok: false, error: 'sessionId is required' } }
   }
   const { workspace, cwd } = resolveSessionWorkspace(ctx, deps, sessionId)
-  if (workspace === undefined) {
-    return { status: 200, body: { ok: true, enabled: false, cwd: cwd ?? null } }
+  if (workspace !== undefined) {
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        enabled: true,
+        cwd: cwd ?? null,
+        workspace: { path: workspace.path, title: workspace.title },
+      },
+    }
   }
-  return {
-    status: 200,
-    body: {
-      ok: true,
-      enabled: true,
-      cwd: cwd ?? null,
-      workspace: { path: workspace.path, title: workspace.title },
-    },
-  }
+  const candidate = typeof cwd === 'string' && cwd !== ''
+    ? { path: cwd, title: basename(cwd) }
+    : null
+  return { status: 200, body: { ok: true, enabled: false, cwd: cwd ?? null, workspace: candidate } }
 }
 
 /**
  * Pure decision function behind POST /dsh-easy-sync/session-action.
  *
  * @param {any} ctx
- * @param {{ engine: import('./engine.js').SyncEngine }} deps
+ * @param {{
+ *   engine: import('./engine.js').SyncEngine,
+ *   onWorkspaceEnabled?: (workspace: { path: string, title: string }) => Promise<void> | void,
+ * }} deps
  * @param {unknown} input
- * @returns {{ status: number, body: Record<string, unknown> }}
+ * @returns {Promise<{ status: number, body: Record<string, unknown> }>}
  */
-export function sessionAction(ctx, deps, input) {
+export async function sessionAction(ctx, deps, input) {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
     return { status: 400, body: { ok: false, error: 'JSON object body is required' } }
   }
@@ -143,6 +163,61 @@ export function sessionAction(ctx, deps, input) {
   const sessionId = typeof record.sessionId === 'string' ? record.sessionId.trim() : ''
   if (sessionId === '') return { status: 400, body: { ok: false, error: 'sessionId is required' } }
   const action = typeof record.action === 'string' && record.action !== '' ? record.action : 'sync'
+
+  if (action === 'enable') {
+    const { workspace, cwd } = resolveSessionWorkspace(ctx, deps, sessionId)
+    if (workspace !== undefined) {
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          action,
+          alreadyEnabled: true,
+          workspace: { path: workspace.path, title: workspace.title },
+        },
+      }
+    }
+    if (cwd === undefined) {
+      return { status: 409, body: { ok: false, error: 'workspace-unknown', message: 'This session has no workspace directory on this device.' } }
+    }
+    try {
+      const result = deps.engine.enable(cwd, { note: 'enabled from the session menu', registryPaths: registryPathsOf(ctx) })
+      await deps.onWorkspaceEnabled?.(result.workspace)
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          action,
+          enabled: true,
+          workspace: { path: result.workspace.path, title: result.workspace.title },
+          archived: result.report.archived.length,
+          restored: result.report.restored.length,
+          markerCreated: result.markerCreated,
+        },
+      }
+    } catch (error) {
+      return { status: 400, body: { ok: false, error: errorText(error) } }
+    }
+  }
+
+  if (action === 'disable') {
+    const { workspace, cwd } = resolveSessionWorkspace(ctx, deps, sessionId)
+    const target = workspace?.path ?? cwd
+    if (target === undefined) {
+      return { status: 409, body: { ok: false, error: 'workspace-unknown' } }
+    }
+    const removed = deps.engine.disable(target)
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        action,
+        disabled: removed,
+        workspace: { path: target, title: workspace?.title ?? basename(target) },
+      },
+    }
+  }
+
   const options = ACTIONS[action]
   if (options === undefined) {
     return { status: 400, body: { ok: false, error: `unknown action: ${action}` } }
@@ -170,6 +245,132 @@ export function sessionAction(ctx, deps, input) {
   }
 }
 
+/**
+ * Pure decision function behind GET /dsh-easy-sync/workspaces.
+ *
+ * Merges the host registry's workspaces (what the sidebar shows) with the sync
+ * engine's view, so the panel can offer a switch for workspaces that are not
+ * opted in yet as well as archive counts for the ones that are.
+ *
+ * @param {any} ctx
+ * @param {{ engine: import('./engine.js').SyncEngine }} deps
+ * @returns {{ status: number, body: Record<string, unknown> }}
+ */
+export function workspacesInfo(ctx, deps) {
+  const registry = safeService(ctx, 'workspaceRegistry')
+  const registryWorkspaces = registry !== undefined && typeof registry.list === 'function' ? registry.list() : []
+  const registryPaths = registryWorkspaces
+    .map((workspace) => workspace.path)
+    .filter((path) => typeof path === 'string')
+  deps.engine.refreshWorkspaces({ registryPaths })
+
+  const merged = new Map()
+  for (const record of registryWorkspaces) {
+    if (typeof record?.path !== 'string') continue
+    merged.set(pathKey(record.path), {
+      path: record.path,
+      title: typeof record.title === 'string' && record.title !== '' ? record.title : basename(record.path),
+      enabled: false,
+      archiveSessions: 0,
+      localSessions: 0,
+      registered: true,
+    })
+  }
+
+  const status = deps.engine.status()
+  const byPath = new Map(status.workspaces.map((workspace) => [pathKey(workspace.path), workspace]))
+  for (const workspace of deps.engine.listWorkspaces()) {
+    const key = pathKey(workspace.path)
+    const row = merged.get(key) ?? {
+      path: workspace.path,
+      title: workspace.title,
+      registered: false,
+    }
+    const counts = byPath.get(key)
+    merged.set(key, {
+      ...row,
+      title: workspace.title !== '' ? workspace.title : row.title,
+      enabled: true,
+      archiveSessions: counts?.archiveSessions ?? 0,
+      localSessions: counts?.localSessions ?? 0,
+    })
+  }
+
+  const workspaces = [...merged.values()].sort((left, right) => left.title.localeCompare(right.title))
+  return { status: 200, body: { ok: true, workspaces } }
+}
+
+/**
+ * Pure decision function behind POST /dsh-easy-sync/workspace-action.
+ *
+ * @param {any} ctx
+ * @param {{
+ *   engine: import('./engine.js').SyncEngine,
+ *   onWorkspaceEnabled?: (workspace: { path: string, title: string }) => Promise<void> | void,
+ * }} deps
+ * @param {unknown} input
+ * @returns {Promise<{ status: number, body: Record<string, unknown> }>}
+ */
+export async function workspaceAction(ctx, deps, input) {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    return { status: 400, body: { ok: false, error: 'JSON object body is required' } }
+  }
+  const record = /** @type {Record<string, unknown>} */ (input)
+  const path = typeof record.path === 'string' ? record.path.trim() : ''
+  if (path === '') return { status: 400, body: { ok: false, error: 'path is required' } }
+  const action = typeof record.action === 'string' && record.action !== '' ? record.action : 'sync'
+
+  if (action === 'enable') {
+    try {
+      const result = deps.engine.enable(path, { note: 'enabled from the Easy Sync panel', registryPaths: registryPathsOf(ctx) })
+      await deps.onWorkspaceEnabled?.(result.workspace)
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          action,
+          enabled: true,
+          workspace: { path: result.workspace.path, title: result.workspace.title },
+          archived: result.report.archived.length,
+          restored: result.report.restored.length,
+          markerCreated: result.markerCreated,
+        },
+      }
+    } catch (error) {
+      return { status: 400, body: { ok: false, error: errorText(error) } }
+    }
+  }
+
+  if (action === 'disable') {
+    const removed = deps.engine.disable(path)
+    return { status: 200, body: { ok: true, action, disabled: removed, workspace: { path } } }
+  }
+
+  if (action === 'sync') {
+    deps.engine.refreshWorkspaces({ registryPaths: registryPathsOf(ctx) })
+    const workspace = deps.engine.workspaceForCwd(path)
+    if (workspace === undefined) {
+      return { status: 409, body: { ok: false, error: 'workspace-not-synced' } }
+    }
+    const report = deps.engine.syncWorkspace(workspace, ACTIONS.sync)
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        action,
+        workspace: { path: workspace.path, title: workspace.title },
+        restored: report.restored.length,
+        archived: report.archived.length,
+        repaired: report.repaired.length,
+        conflicts: report.conflicts.length,
+        warnings: report.warnings.slice(0, 5),
+      },
+    }
+  }
+
+  return { status: 400, body: { ok: false, error: `unknown action: ${action}` } }
+}
+
 async function handleInfoRequest(ctx, deps, req, res) {
   if (rejectForeignRequest(ctx, req, res)) return
   if (req.method !== 'GET') {
@@ -186,7 +387,40 @@ async function handleInfoRequest(ctx, deps, req, res) {
   }
 }
 
+async function handleWorkspacesRequest(ctx, deps, req, res) {
+  if (rejectForeignRequest(ctx, req, res)) return
+  if (req.method !== 'GET') {
+    sendMethodNotAllowed(res, 'GET')
+    return
+  }
+  try {
+    const outcome = workspacesInfo(ctx, deps)
+    sendJson(res, outcome.status, outcome.body)
+  } catch (error) {
+    deps.log('warn', `workspaces route failed: ${errorText(error)}`)
+    sendJson(res, 500, { ok: false, error: 'internal error' })
+  }
+}
+
 async function handleActionRequest(ctx, deps, req, res) {
+  await handleJsonPost(ctx, deps, req, res, (input) => sessionAction(ctx, deps, input))
+}
+
+async function handleWorkspaceActionRequest(ctx, deps, req, res) {
+  await handleJsonPost(ctx, deps, req, res, (input) => workspaceAction(ctx, deps, input))
+}
+
+/**
+ * Shared POST plumbing: trust fence, method, media type, bounded body, JSON
+ * parse, then the pure decision function.
+ *
+ * @param {any} ctx
+ * @param {{ log: (kind: string, message: string) => void }} deps
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {(input: unknown) => Promise<{ status: number, body: Record<string, unknown> }>} decide
+ */
+async function handleJsonPost(ctx, deps, req, res, decide) {
   if (rejectForeignRequest(ctx, req, res)) return
   if (req.method !== 'POST') {
     sendMethodNotAllowed(res, 'POST')
@@ -215,10 +449,10 @@ async function handleActionRequest(ctx, deps, req, res) {
     return
   }
   try {
-    const outcome = sessionAction(ctx, deps, input)
+    const outcome = await decide(input)
     sendJson(res, outcome.status, outcome.body)
   } catch (error) {
-    deps.log('warn', `session action route failed: ${errorText(error)}`)
+    deps.log('warn', `workspace action route failed: ${errorText(error)}`)
     sendJson(res, 500, { ok: false, error: 'internal error' })
   }
 }
@@ -281,6 +515,17 @@ function safeService(ctx, name) {
     return ctx?.[name]
   } catch {
     return undefined
+  }
+}
+
+/** Registry workspace paths, the discovery candidates a route may use. */
+function registryPathsOf(ctx) {
+  const registry = safeService(ctx, 'workspaceRegistry')
+  if (registry === undefined || typeof registry.list !== 'function') return []
+  try {
+    return registry.list().map((workspace) => workspace.path).filter((path) => typeof path === 'string')
+  } catch {
+    return []
   }
 }
 

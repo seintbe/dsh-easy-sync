@@ -653,6 +653,7 @@ workspace 行（web patch 第 75 行）→ WorkspaceRegistry 构造 → [Service
 | `sidebar.workspaces.session.menu.item` | `{ sessionId, displayTitle }` | `menuOpenState`（`[open, setOpen]`） | 会话 “…”/右键菜单行（list，order 500+ 排在内置项后） |
 | `sidebar.workspaces.session.row.action` | 同上 | 无 | 会话行悬停按钮 |
 | `sidebar.session.row.leading` / `.hover` | 会话行 | 无 | 行内前后缀 |
+| `sidebar.footer.action` | `{ wide }` | 无 | 侧边栏底部动作（list；`wide=false` 时只剩 56px 图标栏） |
 
 - 注册写法（list slot，`ctx.slots.inject` 等 slot 就绪后执行）：
 
@@ -684,11 +685,18 @@ ctx.effect(() => ctx.webServer.register({ kind: 'exact', path, handler }), label
   响应 `content-type: application/json; charset=utf-8` + `cache-control: no-store`。
 - 本插件把这两个服务放在 `ctx.inject(['webServer','connection'], child => ...)`
   里，headless profile 永不注册路由；无 `connection` 时 fail closed。
+- 本插件实际路由：`GET /dsh-easy-sync/session`（会话所属工作区及是否已启用）、
+  `POST /dsh-easy-sync/session-action`（sync/restore/archive/enable/disable）、
+  `GET /dsh-easy-sync/workspaces`（注册表工作区 + 同步状态）、
+  `POST /dsh-easy-sync/workspace-action`（enable/disable/sync）。
+- “启用”是 workspace 级操作，必须由宿主完成 `engine.enable(cwd)`，并把新工作区
+  注册进 `workspaceRegistry`（`registry.create` + `attachSession`）；客户端只点按钮。
 
 ### 12.4 版本差异速记
 
 - 0.1.5 CLI：无 `sidebar.workspaces.session.menu.item`；`ctx.slots` 有
-  `inject`/`register` 但未知 slot 不渲染——客户端半静默降级为空操作。
+  `inject`/`register` 但未知 slot 不渲染——会话菜单项静默降级为空操作。
+  0.1.5 侧边栏有 `sidebar.footer.action`，底部 Easy Sync 面板可以照常注册。
 - 0.2.1 桌面：上述 slot 存在，会话菜单可用；添加 UI 后必须**完全重启** Electron。
 - 两侧服务 API（`webServer.register`、`connection.requestRejection`）在 0.1.5 与
   0.2.1 实测一致，宿主路由可共用。
