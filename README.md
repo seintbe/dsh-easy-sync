@@ -18,13 +18,17 @@ inside the workspace itself and restores it on the next start.
 - Restored sessions are attached to the workspace registry immediately, so they
   appear in the sidebar without a second restart.
 - While running, live sessions are debounce-archived after a persistence flush.
+- On the desktop app 0.2.x, a sync workspace's sessions gain two entries in the
+  session "..." (right-click) menu: *Sync this workspace* and *Restore from
+  archive*. Other sessions show neither.
 
 Chinese documentation: [README.zh.md](README.zh.md).
 
 ## Install
 
 Requirements: Node.js ≥ 22.15 (for `node:zlib` zstd support), DSH 0.1.5+.
-The plugin has no third-party runtime dependencies.
+The session menu entries need DSH desktop 0.2.x; older hosts keep the agent
+tool. The plugin has no third-party runtime dependencies.
 
 ### CLI-managed profiles
 
@@ -71,6 +75,13 @@ Manual opt-in: create `<workspace>/.dsh-sync.json` containing `{"version":1}`.
 See [README.zh.md](README.zh.md) for configuration, sync policy, conflicts and
 design notes.
 
+Desktop 0.2.x session menu: the "..." menu (also opened by right-clicking a
+session row) gains **Sync this workspace** and **Restore from archive** for
+sessions whose workspace is opted in. The entries are additive; workspace-row
+menus have no extension point in DSH, so there is no "make this a sync
+workspace" item. Hosts without that slot (0.1.x CLI/web) simply do not render
+the entries and keep the agent tool.
+
 ## Diagnostics
 
 DSH ships no logger exporter today, so the plugin writes `warn`/`error` lines to
@@ -79,7 +90,12 @@ stderr and, with `logLevel: debug`, drops snapshots into
 
 - `startup.json` — discovered workspaces plus the restore/archive report;
 - `registry.json` — registry-visible workspaces, attach results/errors;
-- `tools.json` — whether `workspace_sync` registered.
+- `tools.json` — whether `workspace_sync` registered;
+- `web.json` — the session-menu HTTP routes registered on a web/desktop profile.
+
+The menu routes sit behind DSH's `connection` trust fence (`requestRejection`,
+Host/Origin plus the login cookie) and are not registered when that service is
+absent; headless profiles keep the tool-only surface.
 
 ## Version compatibility
 
@@ -97,8 +113,9 @@ $env:DSH_E2E='1'; npm run test:e2e   # real dsh web boot, isolated DSH_HOME
 ```
 
 The end-to-end test proves activation-time restore, header cwd rewriting,
-workspace registration/attachment and tool registration against the real
-harness; it never touches the real `~/.dsh` (only reads shared profile deps).
+workspace registration/attachment, tool registration and that the client half
+is actually served by the web module system; it never touches the real `~/.dsh`
+(only reads shared profile deps).
 
 ## License
 

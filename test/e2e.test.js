@@ -33,6 +33,7 @@ import { fileURLToPath } from 'node:url'
 
 import { encodeSegment, generationLogFilename, sessionDir } from '../src/paths.js'
 import { encodeSessionLog, inspectSessionFile } from '../src/session-file.js'
+import { ACTION_ROUTE, INFO_ROUTE } from '../src/web-routes.js'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const dshBin = process.env.DSH_BIN || (process.platform === 'win32' ? 'dsh.cmd' : 'dsh')
@@ -231,6 +232,55 @@ test(
         }
       }, 30_000, 'the workspace_sync tool to register')
       assert.deepEqual(toolsSnapshot.registered, ['workspace_sync'])
+
+      const webSnapshotPath = join(env.home, 'dsh-easy-sync', 'web.json')
+      const webSnapshot = await waitFor(() => {
+        if (!existsSync(webSnapshotPath)) return undefined
+        try {
+          return JSON.parse(readFileSync(webSnapshotPath, 'utf8'))
+        } catch {
+          return undefined
+        }
+      }, 30_000, 'the client-menu web routes to register')
+      assert.deepEqual(webSnapshot.routes, [INFO_ROUTE, ACTION_ROUTE])
+
+      // Prove the client half is actually served by the real web client module
+      // system: the shell HTML carries the boot graph, and one served script
+      // contains our ModuleLoader registration. This is host-side only; it does
+      // not execute the browser code (that needs the desktop app).
+      const urlMatch = output.match(/http:\/\/127\.0\.0\.1:\d+\/?\S*/)
+      assert.ok(urlMatch, `web URL missing from output: ${output.slice(-400)}`)
+      const pageUrl = new URL(urlMatch[0])
+      // The tokenized URL sets the login cookie and redirects; Node fetch drops
+      // Set-Cookie across redirects, so capture it explicitly.
+      const first = await fetch(pageUrl, { redirect: 'manual', headers: { accept: 'text/html' } })
+      const cookie = first.headers.getSetCookie?.()[0]?.split(';')[0]
+        ?? first.headers.get('set-cookie')?.split(';')[0]
+      const location = first.headers.get('location')
+      const indexResponse = first.status >= 300 && first.status < 400
+        ? await fetch(new URL(location ?? '/', pageUrl), { headers: cookie === undefined ? {} : { cookie } })
+        : first
+      const html = await indexResponse.text()
+      if (!html.includes('dsh-easy-sync')) {
+        process.stderr.write(`[e2e-debug] first=${first.status} index=${indexResponse.status} length=${html.length}\n${html.slice(0, 1200)}\n`)
+      }
+      assert.ok(html.includes('dsh-easy-sync'), 'boot graph must contain the client half')
+      const assetUrls = new Set()
+      for (const match of html.matchAll(/(?:src|href)="([^"]+)"/g)) assetUrls.add(match[1].replaceAll('&amp;', '&'))
+      assert.ok(assetUrls.size > 0, 'shell must reference client assets')
+      const authHeaders = cookie === undefined ? {} : { cookie }
+      let clientServed = false
+      for (const source of assetUrls) {
+        if (!/\/(?:plugins|assets)\//.test(source)) continue
+        const assetUrl = new URL(source, pageUrl)
+        const response = await fetch(assetUrl, { headers: authHeaders })
+        const text = response.ok ? await response.text() : ''
+        if (text.includes('__ModuleLoader__.load') && text.includes('sidebar.workspaces.session.menu.item')) {
+          clientServed = text.includes('dsh-easy-sync')
+          if (clientServed) break
+        }
+      }
+      assert.ok(clientServed, 'the client bundle must be served by the web module system')
 
       const archiveHashAfter = createHash('sha256').update(readFileSync(env.archiveFile)).digest('hex')
       assert.equal(archiveHashAfter, env.archiveHash, 'restoring must not rewrite the archive')

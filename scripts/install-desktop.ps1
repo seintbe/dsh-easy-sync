@@ -11,13 +11,20 @@
 
 [CmdletBinding()]
 param(
-    [string]$RepoPath = (Split-Path -Parent $PSScriptRoot),
+    [string]$RepoPath = '',
     [string]$ProfileDir,
     [switch]$Remove,
     [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
+
+# `$PSScriptRoot` is unavailable while parameter defaults bind under Windows
+# PowerShell 5.1, so the fallback is resolved after the param block.
+if (-not $RepoPath -or $RepoPath.Trim() -eq '') {
+    $RepoPath = Split-Path -Parent $PSScriptRoot
+}
+$RepoPath = [System.IO.Path]::GetFullPath($RepoPath)
 
 $packageName = 'dsh-easy-sync'
 
@@ -66,6 +73,17 @@ function Write-JsonUtf8([string]$Path, $Object) {
     [System.IO.File]::WriteAllText($Path, $json + "`n", $encoding)
 }
 
+# ConvertFrom-Json yields PSCustomObject: assigning a property the manifest does
+# not already carry throws, so absent fields are added first.
+function Set-OrAddProperty($Object, [string]$Name, $Value) {
+    if ($null -eq $Object.PSObject.Properties[$Name]) {
+        $Object | Add-Member -MemberType NoteProperty -Name $Name -Value $Value
+    }
+    else {
+        $Object.$Name = $Value
+    }
+}
+
 $manifest = Read-JsonUtf8 $manifestPath
 if ($null -eq $manifest.dsh -or $null -eq $manifest.dsh.profile) {
     throw "profile manifest has no dsh.profile section: $manifestPath"
@@ -101,8 +119,8 @@ if ($Remove) {
     $dependencies.Remove($packageName)
     $bundles = @($bundles | Where-Object { $_ -ne $packageName })
     Copy-Item -LiteralPath $manifestPath -Destination $backup
-    $manifest.dependencies = $dependencies
-    $manifest.dsh.profile.bundles = $bundles
+    Set-OrAddProperty $manifest 'dependencies' $dependencies
+    Set-OrAddProperty $manifest.dsh.profile 'bundles' $bundles
     Write-JsonUtf8 $manifestPath $manifest
     Write-Host "uninstalled; backed up manifest to $backup" -ForegroundColor Green
     Write-Host "Fully restart the desktop app." -ForegroundColor Cyan
@@ -126,8 +144,8 @@ if ($bundles -notcontains $packageName) {
 }
 
 Copy-Item -LiteralPath $manifestPath -Destination $backup
-$manifest.dependencies = $dependencies
-$manifest.dsh.profile.bundles = $bundles
+Set-OrAddProperty $manifest 'dependencies' $dependencies
+Set-OrAddProperty $manifest.dsh.profile 'bundles' $bundles
 Write-JsonUtf8 $manifestPath $manifest
 
 Write-Host "installed dsh-easy-sync into the desktop profile" -ForegroundColor Green

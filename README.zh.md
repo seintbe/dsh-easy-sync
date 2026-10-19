@@ -11,7 +11,9 @@
 - 每次 DSH 启动时，**优先从工作区存档恢复**对话（自动把会话 header 里的 `cwd`
   改写成本机工作区路径，所以不同设备路径不同也没关系）；
 - 恢复出来的会话会立即挂回工作区列表，不需要重启第二次；
-- 运行过程中持续增量归档，切换设备前无需手动操作。
+- 运行过程中持续增量归档，切换设备前无需手动操作；
+- 桌面版 0.2.x 的会话 “…”（右键）菜单里可直接点“同步此工作区 / 从存档恢复”，
+  非同步工作区不会显示这两项。
 
 ## 工作原理
 
@@ -89,6 +91,12 @@ pwsh -File .\scripts\install-desktop.ps1
 pwsh -File .\scripts\install-desktop.ps1 -Remove
 ```
 
+没装 PowerShell 7 的机器（只有 Windows PowerShell 5.1）用：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-desktop.ps1
+```
+
 然后**完全退出并重新打开** DeepSeek Harness 桌面版（不是刷新页面）。
 
 脚本做了三件事：
@@ -98,6 +106,7 @@ pwsh -File .\scripts\install-desktop.ps1 -Remove
 
 > 也可以手动完成上述三步。安装前请确认桌面版完全退出，避免应用覆盖 profile 文件。
 > 如果桌面版提供应用内插件管理器，优先使用它做等效操作；本脚本是不依赖 CLI 的兜底方案。
+> 桌面版 0.2.x 重启后，同步工作区的会话 “…” 菜单里会多出同步/恢复两项（见“使用”）。
 
 > 说明：本插件的端到端测试跑在隔离的 `dsh web` 实例上（见“开发与测试”）。
 > 桌面版由 Electron 管理 profile，无法在纯命令行环境里做同等的重启级验证，
@@ -167,6 +176,25 @@ header 里的 `cwd` 改写成 Mac 上的实际路径。
 2. 创建 `.dsh-sync/sessions/`；
 3. 把该工作区现有会话全部归档；
 4. 把工作区注册进 DSH、把会话挂到工作区列表。
+
+### 会话右键菜单（桌面版 0.2.x）
+
+桌面版 0.2.x 的会话行 “…” 菜单（右键同一行也会打开它）里，属于同步工作区的会话会多出
+两项：
+
+- **同步此工作区**：先归档本地较新的会话，再从存档恢复较新的会话；
+- **从存档恢复**：只做恢复，不把本地会话写回存档。
+
+点击后菜单项会显示“同步中…”→“已同步”（失败显示“同步失败”），随后菜单自动关闭。
+不是同步工作区的会话不显示这两项——插件先向本机宿主查询该会话所属工作区，查询失败或
+未启用时静默隐藏，不会打扰普通会话。
+
+> 这两项来自 DSH 桌面版给会话菜单预留的扩展位
+> （`sidebar.workspaces.session.menu.item`）。工作区行的右键菜单由 DSH 内置
+> （只有重命名/删除），没有扩展点，因此无法在这里加“设为同步工作区”；请用下面的
+> `workspace_sync` 工具或手工写标记来启用工作区。
+>
+> 0.1.5 及更早的 CLI/Web 侧边栏没有这个扩展位，所以不会出现菜单项；agent 工具不受影响。
 
 ### 手工启用
 
@@ -269,11 +297,16 @@ DSH 目前没有把 `ctx.logger` 的输出接到 stderr 或文件，所以插件
 - 不同步 `~/.dsh/attachments`（图片/附件）与全局设置、凭据。
 - 不改变 DSH 的会话格式，不做跨版本迁移；恢复时保留原 generation 版本。
 - 不在多设备并发编辑同一会话时做 CRDT 合并。
+- 不替换或改写 DSH 自带的右键菜单：只在桌面 0.2.x 的会话菜单**追加**自己的两项，
+  不改动内置项；工作区行菜单没有扩展点。
 
 ## 安全与回滚
 
 - 插件初始化全程包裹异常：同步失败只记录日志，不会阻止 DSH 启动。
 - 恢复写在临时文件后原子 rename；存档同样原子发布，外部同步工具不会读到半截文件。
+- 会话菜单的两个宿主路由与 DSH 自己的 open-in-app 一样，先过 `connection` 服务的
+  信任栅栏（`requestRejection`，Host/Origin + 登录 Cookie）；没有该服务时路由直接
+  关闭（fail closed），不会暴露未鉴权的写入口。
 - `disable` 只移除 `.dsh-sync.json` 标记（改名保留为 `.dsh-sync.json.disabled-<时间>`），
   不删除 `.dsh-sync/` 存档；把改名后的文件改回去即可重新启用。
 - 桌面版安装脚本会备份 `package.json`，可用 `-Remove` 卸载。
@@ -288,6 +321,11 @@ DSH 目前没有把 `ctx.logger` 的输出接到 stderr 或文件，所以插件
   `<工作区>/.dsh-sync/conflicts/`，不会删除。
 - 工作区目录被移动后，DSH 自己会静默过滤掉旧路径上的会话；插件下次启动会按新路径
   重新恢复（前提是工作区标记与存档跟着一起移动）。
+- 会话菜单项只在桌面版 0.2.x（`dsh.client` 客户端包 + 会话菜单 slot）出现；0.1.x 或
+  没有该 slot 的宿主只提供 `workspace_sync` 工具。
+- 菜单项通过宿主 HTTP 路由工作（`/dsh-easy-sync/session`、
+  `/dsh-easy-sync/session-action`），因此只在 web/桌面 profile 注册；headless profile
+  不暴露这两个路由。
 
 ## 开发与测试
 
@@ -304,6 +342,7 @@ npm run test:e2e    # 真实 dsh web 端到端（需要 DSH_E2E=1，见下）
 3. 启动 `dsh --profile e2e --port 0 --no-open`；
 4. 断言启动阶段（不是稍后）就完成了恢复、header cwd 已改写成本机路径、
    工作区注册表里出现该工作区且会话已 attach、`workspace_sync` 工具已注册、
+   会话菜单的两个宿主路由已注册且客户端 bundle 确实被打进 web 的合并脚本、
    存档文件未被改写。
 
 ```powershell
@@ -323,6 +362,8 @@ src/engine.js       归档/恢复引擎（纯同步 fs，无服务依赖）
 src/session-file.js zstd 多帧解析、头部 cwd 重写、破损尾部裁剪
 src/paths.js        DSH 会话路径编码规则（与官方后端逐字一致）
 src/config.js       配置、标记、工作区发现
+src/web-routes.js   桌面客户端菜单使用的两个宿主 HTTP 路由（含信任栅栏）
+client.js           桌面 0.2.x 客户端半：会话 “…” 菜单里的两项
 test/               node:test 测试
 scripts/            Windows PowerShell 与 macOS/Linux Bash 安装脚本
 docs/               DSH 插件 API 侦察笔记

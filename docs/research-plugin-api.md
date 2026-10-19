@@ -622,3 +622,73 @@ workspace 行（web patch 第 75 行）→ WorkspaceRegistry 构造 → [Service
 1. **插件壳**：`export const name` + `apply(ctx, config)`；**不写顶层 `inject`**；`apply` 同步体只做 fs-only 的启动恢复，且整体 try/catch；所有服务集成走 `ctx.inject([...], child => { try/catch })`。
 2. **恢复 → 可见**：恢复出的会话必须是**已持久化**的（有 header、cwd 可 realpath、与 workspace.path 严格相等），然后在 `ctx.inject(['workspaceRegistry'])` 里对目标 `Workspace` 实体调用 `attachSession(id)`（前插、幂等、立即写 `storages\workspace.json`）。
 3. **绝不拖慢/毒化宿主**：`session/event`/`session/flush` 只做调度；不监听 `session/created`（不要否决别人的创建）；异步初始化不要 await 进 `apply` 的返回路径；日志自带出口。
+
+---
+
+## 12. 附：桌面版 0.2.x 的客户端插件面（本仓库 client.js 的依据）
+
+> 依据本机桌面运行时 0.2.1-rc.2（`app.asar` 内 55 个 `dsh-client-ui-*` 包），与
+> 0.1.5 CLI 的 web 侧不同；0.1.5 没有下文这些会话菜单 slot。
+
+### 12.1 双面包声明
+
+```json
+"exports": { ".": "./src/index.js", "./client": "./client.js" },
+"dsh": { "client": { "platform": "web" } }
+```
+
+- `platform` 必填字符串；`inject` / `external` / `immediately` 可选。
+- 客户端产物由 `window.__ModuleLoader__.load({ id: "<包名>", factory: (require) => { ...; return module.exports } })`
+  包装；factory 延迟物化，`require` 是同步的、只能取已注册模块或静态种子
+  （`react`、`react/jsx-runtime`、`@deepseek-ai/dsh-client-ui-primitives` 等）。
+- 手写该包装不需要构建步骤；本仓库 `client.js` 即是。
+- 客户端 cordis 插件：`exports.apply(ctx)` + `exports.inject = ['slots','locale']`；
+  `ctx.effect(() => ctx.locale.register(NS, { zh, en }), label)` 注册词典，
+  `t = ctx.locale.bind(NS)`。
+
+### 12.2 会话菜单扩展点（0.2.1）
+
+| slot | owner props | hook context | 用途 |
+| --- | --- | --- | --- |
+| `sidebar.workspaces.session.menu.item` | `{ sessionId, displayTitle }` | `menuOpenState`（`[open, setOpen]`） | 会话 “…”/右键菜单行（list，order 500+ 排在内置项后） |
+| `sidebar.workspaces.session.row.action` | 同上 | 无 | 会话行悬停按钮 |
+| `sidebar.session.row.leading` / `.hover` | 会话行 | 无 | 行内前后缀 |
+
+- 注册写法（list slot，`ctx.slots.inject` 等 slot 就绪后执行）：
+
+```js
+ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({
+  name: 'sidebar.workspaces.session.menu.item',
+  id: 'my-plugin',
+  order: 500,
+  locale: NS,
+}, Component))
+```
+
+- 组件收到 `sessionId`、`useMenuOpenState`（hook）与注入项；`MenuItemButton`
+  来自 `@deepseek-ai/dsh-client-ui-primitives`，`onSelect` 里可 `setOpen(false)`。
+- **工作区行菜单不可扩展**：0.2.1 源码注释明确只有 Rename/Delete，无 slot；
+  不要试图通过替换侧边栏实现“设为同步工作区”。
+
+### 12.3 宿主 HTTP 路由（给客户端调用）
+
+0.2.1 的 `dsh-host-open-in-app` 是模板：
+
+```js
+export const inject = ['webServer', 'connection']
+const reject = (req) => ctx.connection.requestRejection(req) // 401/403 则拒绝
+ctx.effect(() => ctx.webServer.register({ kind: 'exact', path, handler }), label)
+```
+
+- POST 必须校验 `content-type: application/json`、限制 body（64 KiB）；
+  响应 `content-type: application/json; charset=utf-8` + `cache-control: no-store`。
+- 本插件把这两个服务放在 `ctx.inject(['webServer','connection'], child => ...)`
+  里，headless profile 永不注册路由；无 `connection` 时 fail closed。
+
+### 12.4 版本差异速记
+
+- 0.1.5 CLI：无 `sidebar.workspaces.session.menu.item`；`ctx.slots` 有
+  `inject`/`register` 但未知 slot 不渲染——客户端半静默降级为空操作。
+- 0.2.1 桌面：上述 slot 存在，会话菜单可用；添加 UI 后必须**完全重启** Electron。
+- 两侧服务 API（`webServer.register`、`connection.requestRejection`）在 0.1.5 与
+  0.2.1 实测一致，宿主路由可共用。

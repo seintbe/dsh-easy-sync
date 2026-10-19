@@ -20,6 +20,7 @@ import { join, resolve } from 'node:path'
 
 import { hasMarker, normalizeConfig, pathKey, readStoredWorkspacePaths, samePath, stateDir } from './config.js'
 import { SyncEngine, emptyReport } from './engine.js'
+import { registerWebRoutes } from './web-routes.js'
 
 /** Cordis plugin name. */
 export const name = 'dsh-easy-sync'
@@ -287,6 +288,31 @@ export function apply(ctx, rawConfig = {}) {
     })
   } catch (error) {
     log('debug', `tools service is unavailable: ${errorText(error)}`)
+  }
+
+  // ---------------------------------------------------------------------
+  // 5. Web routes for the optional desktop client menu.
+  // ---------------------------------------------------------------------
+  try {
+    ctx.inject(['webServer', 'connection'], (child) => {
+      try {
+        const routes = registerWebRoutes(child, {
+          engine,
+          log,
+          onRegistered: (paths) => {
+            log('debug', `registered web route(s): ${paths.join(', ')}`)
+            writeStartupSnapshot(config, 'web', { phase: 'web', routes: paths })
+          },
+        })
+        if (routes.length === 0) {
+          log('debug', 'web server is present but refused the dsh-easy-sync routes')
+        }
+      } catch (error) {
+        log('warn', `web routes could not be registered: ${errorText(error)}`)
+      }
+    })
+  } catch (error) {
+    log('debug', `web routes unavailable: ${errorText(error)}`)
   }
 }
 
